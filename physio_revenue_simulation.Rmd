@@ -1,0 +1,623 @@
+---
+title: "Physiotherapy Practice Revenue Simulation - Switzerland (Canton-Specific)"
+author: "Data Analysis Project"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    fig_width: 10
+    fig_height: 6
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# 1. Session Info & Dependencies
+
+```{r dependencies}
+# Core packages
+library(tidyverse)
+library(ggplot2)
+library(gridExtra)
+
+# Session info for reproducibility
+sessionInfo()
+
+# Set seed for reproducibility
+set.seed(42)
+
+# Define global simulation parameters
+WORKING_DAYS_PER_MONTH <- 21  # Excludes weekends (~5 weeks * 4.2 days/week)
+POINT_TO_CHF_CONVERSION <- 1  # Assumed conversion: 1 point = 1 CHF (simplification)
+```
+
+# 2. Data Setup: Tariff Positions, Cantons, and Supplements
+
+```{r data_setup}
+
+# ============================================================================
+# CANTON TARIFF POINT VALUES (TPW 2024 - KVG)
+# Source: Physioswiss (as indicated by author; not verified by code)
+# ============================================================================
+Ktpw <- data.frame(
+  kanton = c("AG","AI","AR","BE","BL","BS","FR","GE","GL","GR",
+             "JU","LU","NE","NW","OW","SG","SH","SO","SZ","TG",
+             "TI","UR","VD","VS","ZG","ZH"),
+  Tpwert = c(1.05, 0.97, 0.99, 1.03, 1.03, 1.08, 0.98, 1.07, 1.01, 0.94,
+             0.95, 0.99, 0.96, 1.01, 0.95, 0.98, 1.05, 1.03, 0.99, 1.00,
+             0.95, 0.98, 1.00, 0.96, 1.11, 1.11),
+  stringsAsFactors = FALSE
+)
+
+# ============================================================================
+# MAIN TARIFF POSITIONS (7301-7340)
+# Standard treatment types with probabilities and point values
+# ============================================================================
+Pauschal <- data.frame(
+  Tarif_position = c("7301", "7311", "7312", "7313", "7320", "7330", "7340"),
+  Tarif_prob = c(0.50, 0.15, 0.10, 0.02, 0.08, 0.10, 0.05),
+  Behandlung = c(
+    "Allgemeine Physiotherapie",
+    "Komplexe Kinesiotherapie",
+    "Manuelle Lymphdrainage",
+    "Hippotherapie",
+    "Elektro- & Thermotherapie / Instruktion",
+    "Gruppentherapie",
+    "Muskelaufbautraining (MTT)"
+  ),
+  Punkte = c(48, 77, 77, 77, 10, 25, 22),
+  stringsAsFactors = FALSE
+)
+
+# ============================================================================
+# SUPPLEMENTARY CHARGES (Zuschläge - 7350-7363)
+# Optional add-ons per session or annual basis
+# Some are point-based, others are annual CHF amounts
+# 
+# Note on annual CHF items (e.g., "CHF 50.– (jährlich)"):
+# We model these as: IF the supplement is triggered for a practice,
+# it adds a fixed annual amount (applied once per year to annual revenue)
+# ============================================================================
+zuschlaege <- data.frame(
+  Tarif_position = c("7350", "7351", "7352", "7353", "7354", "7360", "7362", "7363"),
+  Tarif_prob = c(0.05, 0.0002, 0.0002, 0.02, 0.10, 0.002, 0.003, 0.00001),
+  Leistung = c(
+    "Erstbehandlung",
+    "Kinder mit chronischer Behinderung (bis 6 J.)",
+    "Therapiebad / Gehbecken",
+    "Infrastruktur Hippotherapie",
+    "Weg-/Zeitentschädigung (Hausbesuch)",
+    "Hilfsmittel gemäss Lima",
+    "Materialpauschale vaginale Sonde",
+    "Materialpauschale anale Sonde"
+  ),
+  Punkte_oder_Betrag = c(
+    "24 Punkte", "30 Punkte", "19 Punkte", "67 Punkte",
+    "34 Punkte", "77 Punkte", "CHF 50.– (jährlich)", "CHF 90.– (jährlich)"
+  ),
+  stringsAsFactors = FALSE
+)
+
+# Parse supplements into numeric values
+# Point-based supplements: extract numeric value (e.g., "24 Punkte" -> 24)
+# Annual CHF: extract numeric value (e.g., "CHF 50.– (jährlich)" -> 50)
+zuschlaege$Punkte_value <- as.numeric(gsub("([0-9]+).*", "\\1", zuschlaege$Punkte_oder_Betrag))
+zuschlaege$Is_annual_CHF <- grepl("CHF", zuschlaege$Punkte_oder_Betrag)
+
+print("Data structures loaded successfully:")
+cat("Cantons:", nrow(Ktpw), "\n")
+cat("Main treatments:", nrow(Pauschal), "\n")
+cat("Supplements:", nrow(zuschlaege), "\n")
+
+```
+
+# 3. Simulation: Generate Practice Data
+
+```{r simulation}
+
+# ============================================================================
+# SIMULATION PARAMETERS (EXPERT ASSUMPTIONS - SYNTHETIC)
+# ============================================================================
+# n_Physio:     Number of physiotherapists per practice (1-6)
+# n_beh:        Number of patient treatments per physio per day (8-20)
+# Tarif_pos:    Treatment type (sampled from Pauschal with given probabilities)
+# kanton:       Canton of operation (uniform sampling)
+#
+# Working model:
+#   - n_Physio physios work WORKING_DAYS_PER_MONTH days per month
+#   - Each physio conducts n_beh treatments per day
+#   - Each treatment generates Punkte points (treatment-specific)
+#   - Tpwert (canton multiplier) adjusts point value across cantons
+#   - Supplements are optional per-session or annual add-ons
+#   - Annual revenue = total points * POINT_TO_CHF_CONVERSION + annual supplements
+# ============================================================================
+
+n <- 160  # Number of practices to simulate
+
+sim_dat <- data.frame(
+  Praxis_id = 1:n,
+  n_Physio = round(runif(n, min = 1, max = 6)),
+  n_beh = round(runif(n, min = 8, max = 20)),
+  Tarif_position = sample(Pauschal$Tarif_position, n, replace = TRUE, 
+                          prob = Pauschal$Tarif_prob),
+  kanton = sample(Ktpw$kanton, n, replace = TRUE),
+  stringsAsFactors = FALSE
+)
+
+# Merge in treatment details (Behandlung, Punkte per treatment)
+sim_dat <- sim_dat %>%
+  left_join(Pauschal[, c("Tarif_position", "Behandlung", "Punkte")], 
+            by = "Tarif_position")
+
+# Merge in canton tariff multipliers
+sim_dat <- sim_dat %>%
+  left_join(Ktpw, by = "kanton")
+
+# Verify no duplicates after merges
+cat("Rows after merge:", nrow(sim_dat), "\n")
+cat("Column names:", paste(names(sim_dat), collapse = ", "), "\n")
+
+```
+
+# 4. Revenue Calculation (with Supplements)
+
+```{r revenue_calculation}
+
+# ============================================================================
+# CORE REVENUE CALCULATION
+# ============================================================================
+# Totale_Punkte (per session) = Punkte (treatment-specific) * Tpwert (canton)
+# Daily points = n_beh * Totale_Punkte_per_session
+# Monthly points = Daily * WORKING_DAYS_PER_MONTH * n_Physio
+# Annual points = Monthly * 12
+# Annual revenue (base) = Annual points * POINT_TO_CHF_CONVERSION (CHF)
+# ============================================================================
+
+sim_dat <- sim_dat %>%
+  mutate(
+    # Points per single treatment session (canton-adjusted)
+    Punkte_per_session = Punkte * Tpwert,
+    
+    # Daily total points: n_beh treatments per physio per day
+    Punkte_per_day = n_beh * Punkte_per_session,
+    
+    # Monthly total points: per physio, working WORKING_DAYS_PER_MONTH days
+    Punkte_per_month = Punkte_per_day * WORKING_DAYS_PER_MONTH,
+    
+    # Total monthly for all physios in practice
+    Punkte_per_month_practice = Punkte_per_month * n_Physio,
+    
+    # Annual total points
+    Punkte_per_year = Punkte_per_month_practice * 12,
+    
+    # Base annual revenue (CHF): points converted at POINT_TO_CHF_CONVERSION
+    Annual_revenue_base = Punkte_per_year * POINT_TO_CHF_CONVERSION
+  )
+
+# ============================================================================
+# SUPPLEMENT MODELING
+# ============================================================================
+# For each practice and each supplement:
+#   - Point-based (e.g., "24 Punkte"): triggered with Tarif_prob
+#     → adds points per treatment (estimated: n_beh * triggered_days_per_month)
+#   - Annual CHF (e.g., "CHF 50.– (jährlich)"): triggered with Tarif_prob
+#     → adds fixed annual CHF amount once per year
+# ============================================================================
+
+# Initialize supplement revenue columns
+sim_dat$Supplement_points_annual <- 0
+sim_dat$Supplement_CHF_annual <- 0
+
+for (i in 1:nrow(sim_dat)) {
+  supplement_points_annual <- 0
+  supplement_chf_annual <- 0
+  
+  for (j in 1:nrow(zuschlaege)) {
+    # Trigger supplement with probability Tarif_prob
+    if (runif(1) < zuschlaege$Tarif_prob[j]) {
+      if (!zuschlaege$Is_annual_CHF[j]) {
+        # Point-based supplement: assume triggered on avg ~60% of working days
+        triggered_days <- WORKING_DAYS_PER_MONTH * 12 * 0.6
+        supplement_points_annual <- supplement_points_annual + 
+          zuschlaege$Punkte_value[j] * sim_dat$n_beh[i] * triggered_days * 
+          sim_dat$Tpwert[i]
+      } else {
+        # Annual CHF supplement: fixed amount, applied once per year
+        supplement_chf_annual <- supplement_chf_annual + zuschlaege$Punkte_value[j]
+      }
+    }
+  }
+  
+  sim_dat$Supplement_points_annual[i] <- supplement_points_annual
+  sim_dat$Supplement_CHF_annual[i] <- supplement_chf_annual
+}
+
+# Total annual revenue (base + supplements)
+sim_dat <- sim_dat %>%
+  mutate(
+    Annual_revenue_total = 
+      Annual_revenue_base * POINT_TO_CHF_CONVERSION + 
+      Supplement_points_annual + 
+      Supplement_CHF_annual
+  )
+
+cat("\n=== REVENUE CALCULATION SUMMARY ===\n")
+cat("Sample practices (first 5):\n")
+print(sim_dat %>%
+  select(Praxis_id, n_Physio, n_beh, kanton, Tpwert, Punkte,
+         Annual_revenue_base, Supplement_points_annual, Supplement_CHF_annual,
+         Annual_revenue_total) %>%
+  head(5))
+
+cat("\nRevenue statistics:\n")
+cat("Mean annual revenue (CHF):", round(mean(sim_dat$Annual_revenue_total), 2), "\n")
+cat("Median annual revenue (CHF):", round(median(sim_dat$Annual_revenue_total), 2), "\n")
+cat("Min:", round(min(sim_dat$Annual_revenue_total), 2), "\n")
+cat("Max:", round(max(sim_dat$Annual_revenue_total), 2), "\n")
+
+```
+
+# 5. Exploratory Data Analysis
+
+```{r eda}
+
+# ============================================================================
+# DESCRIPTIVE STATISTICS BY KEY VARIABLES
+# ============================================================================
+
+cat("\n=== ANNUAL REVENUE BY CANTON ===\n")
+canton_summary <- sim_dat %>%
+  group_by(kanton, Tpwert) %>%
+  summarize(
+    n_practices = n(),
+    mean_revenue = mean(Annual_revenue_total),
+    median_revenue = median(Annual_revenue_total),
+    sd_revenue = sd(Annual_revenue_total),
+    .groups = 'drop'
+  ) %>%
+  arrange(desc(mean_revenue))
+print(canton_summary)
+
+cat("\n=== ANNUAL REVENUE BY TREATMENT TYPE ===\n")
+treatment_summary <- sim_dat %>%
+  group_by(Behandlung) %>%
+  summarize(
+    n_practices = n(),
+    mean_revenue = mean(Annual_revenue_total),
+    median_revenue = median(Annual_revenue_total),
+    sd_revenue = sd(Annual_revenue_total),
+    .groups = 'drop'
+  ) %>%
+  arrange(desc(mean_revenue))
+print(treatment_summary)
+
+cat("\n=== ANNUAL REVENUE BY NUMBER OF PHYSIOTHERAPISTS ===\n")
+physio_summary <- sim_dat %>%
+  group_by(n_Physio) %>%
+  summarize(
+    n_practices = n(),
+    mean_revenue = mean(Annual_revenue_total),
+    median_revenue = median(Annual_revenue_total),
+    sd_revenue = sd(Annual_revenue_total),
+    .groups = 'drop'
+  )
+print(physio_summary)
+
+```
+
+# 6. Statistical Modeling: Regression Analysis
+
+```{r regression}
+
+# ============================================================================
+# MULTIVARIATE REGRESSION: ANNUAL REVENUE DRIVERS
+# Predictors: n_Physio, n_beh, Tpwert, Punkte (treatment points), Behandlung type
+# ============================================================================
+
+# Fit multivariate regression model
+regression_model <- lm(
+  Annual_revenue_total ~ n_Physio + n_beh + Tpwert + Punkte + Behandlung,
+  data = sim_dat
+)
+
+cat("\n=== REGRESSION SUMMARY: ANNUAL REVENUE DRIVERS ===\n")
+print(summary(regression_model))
+
+cat("\n=== MODEL INTERPRETATION ===\n")
+cat("Each additional physiotherapist increases annual revenue by approximately CHF",
+    round(coef(regression_model)["n_Physio"], 2), "\n")
+cat("Each additional daily treatment per physio increases annual revenue by approximately CHF",
+    round(coef(regression_model)["n_beh"], 2), "\n")
+cat("A 0.1-point increase in canton TPW multiplier increases annual revenue by approximately CHF",
+    round(coef(regression_model)["Tpwert"] * 0.1, 2), "\n")
+
+# Model diagnostics
+cat("\n=== MODEL FIT ===\n")
+cat("R-squared:", round(summary(regression_model)$r.squared, 4), "\n")
+cat("Adjusted R-squared:", round(summary(regression_model)$adj.r.squared, 4), "\n")
+
+```
+
+# 7. Visualization: EDA Plots
+
+```{r plots, fig.width=12, fig.height=10}
+
+# Create output directory for plots
+dir.create("../outputs/plots", showWarnings = FALSE, recursive = TRUE)
+
+# ============================================================================
+# Plot 1: Distribution of Annual Revenue
+# ============================================================================
+p1 <- ggplot(sim_dat, aes(x = Annual_revenue_total)) +
+  geom_histogram(bins = 30, fill = "#2E86AB", alpha = 0.7, color = "black") +
+  geom_density(aes(y = after_stat(count)), color = "darkred", size = 1.2) +
+  labs(
+    title = "Distribution of Annual Revenue",
+    subtitle = "Swiss Physiotherapy Practices (n=160)",
+    x = "Annual Revenue (CHF)",
+    y = "Frequency"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 14, face = "bold"))
+
+ggsave("../outputs/plots/01_revenue_distribution.png", p1, width = 10, height = 6)
+print(p1)
+
+# ============================================================================
+# Plot 2: Annual Revenue by Canton (Box Plot)
+# ============================================================================
+p2 <- ggplot(sim_dat, aes(x = reorder(kanton, -Annual_revenue_total, FUN = median), 
+                          y = Annual_revenue_total, fill = Tpwert)) +
+  geom_boxplot(alpha = 0.7) +
+  scale_fill_gradient(low = "#FF6B6B", high = "#4ECDC4") +
+  labs(
+    title = "Annual Revenue by Canton",
+    subtitle = "Color indicates TPW multiplier (darker = higher)",
+    x = "Canton",
+    y = "Annual Revenue (CHF)",
+    fill = "TPW Multiplier"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(size = 14, face = "bold")
+  )
+
+ggsave("../outputs/plots/02_revenue_by_canton.png", p2, width = 12, height = 6)
+print(p2)
+
+# ============================================================================
+# Plot 3: Number of Physios vs. Annual Revenue (Scatter + Regression)
+# ============================================================================
+p3 <- ggplot(sim_dat, aes(x = n_Physio, y = Annual_revenue_total, color = Tpwert)) +
+  geom_point(alpha = 0.6, size = 3) +
+  geom_smooth(method = "lm", se = TRUE, color = "darkblue", linewidth = 1.2) +
+  scale_color_gradient(low = "#FF6B6B", high = "#4ECDC4") +
+  labs(
+    title = "Number of Physiotherapists vs. Annual Revenue",
+    subtitle = "Linear regression with 95% confidence interval",
+    x = "Number of Physiotherapists",
+    y = "Annual Revenue (CHF)",
+    color = "TPW Multiplier"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 14, face = "bold"))
+
+ggsave("../outputs/plots/03_physios_vs_revenue.png", p3, width = 10, height = 6)
+print(p3)
+
+# ============================================================================
+# Plot 4: Daily Treatments per Physio vs. Annual Revenue
+# ============================================================================
+p4 <- ggplot(sim_dat, aes(x = n_beh, y = Annual_revenue_total, color = Tpwert)) +
+  geom_point(alpha = 0.6, size = 3) +
+  geom_smooth(method = "lm", se = TRUE, color = "darkred", linewidth = 1.2) +
+  scale_color_gradient(low = "#FF6B6B", high = "#4ECDC4") +
+  labs(
+    title = "Daily Treatments per Physio vs. Annual Revenue",
+    subtitle = "Linear regression with 95% confidence interval",
+    x = "Number of Treatments per Physio per Day",
+    y = "Annual Revenue (CHF)",
+    color = "TPW Multiplier"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 14, face = "bold"))
+
+ggsave("../outputs/plots/04_treatments_vs_revenue.png", p4, width = 10, height = 6)
+print(p4)
+
+# ============================================================================
+# Plot 5: Revenue by Treatment Type
+# ============================================================================
+p5 <- ggplot(sim_dat, aes(x = reorder(Behandlung, Annual_revenue_total, FUN = median),
+                          y = Annual_revenue_total, fill = Behandlung)) +
+  geom_boxplot(alpha = 0.7, show.legend = FALSE) +
+  coord_flip() +
+  labs(
+    title = "Annual Revenue by Treatment Type",
+    x = "Treatment Type (Behandlung)",
+    y = "Annual Revenue (CHF)"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 14, face = "bold"))
+
+ggsave("../outputs/plots/05_revenue_by_treatment.png", p5, width = 11, height = 6)
+print(p5)
+
+# ============================================================================
+# Plot 6: Sensitivity Analysis - Varying n_Physio and n_beh
+# ============================================================================
+
+sensitivity_grid <- expand.grid(
+  n_Physio = seq(1, 6, by = 1),
+  n_beh = seq(8, 20, by = 2),
+  kanton = "ZH",  # Use high-TPW canton (ZH = 1.11)
+  Tarif_position = "7301",
+  Behandlung = "Allgemeine Physiotherapie",
+  Punkte = 48,
+  Tpwert = 1.11,
+  stringsAsFactors = FALSE
+)
+
+# Compute expected revenue for each scenario
+sensitivity_grid$Expected_revenue <- with(sensitivity_grid, {
+  Punkte_per_session <- Punkte * Tpwert
+  Punkte_per_day <- n_beh * Punkte_per_session
+  Punkte_per_month <- Punkte_per_day * WORKING_DAYS_PER_MONTH
+  Punkte_per_month_practice <- Punkte_per_month * n_Physio
+  Punkte_per_year <- Punkte_per_month_practice * 12
+  Punkte_per_year * POINT_TO_CHF_CONVERSION
+})
+
+p6 <- ggplot(sensitivity_grid, aes(x = n_Physio, y = Expected_revenue, color = factor(n_beh))) +
+  geom_line(size = 1.2) +
+  geom_point(size = 3) +
+  labs(
+    title = "Sensitivity Analysis: Revenue Under Different Staffing Scenarios",
+    subtitle = "Canton ZH (TPW=1.11), Treatment: Allgemeine Physiotherapie",
+    x = "Number of Physiotherapists",
+    y = "Expected Annual Revenue (CHF)",
+    color = "Treatments/Day"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 14, face = "bold"))
+
+ggsave("../outputs/plots/06_sensitivity_analysis.png", p6, width = 11, height = 6)
+print(p6)
+
+cat("\n=== PLOTS SAVED TO: ../outputs/plots/ ===\n")
+
+```
+
+# 8. Results Summary Table
+
+```{r results_table}
+
+# ============================================================================
+# KEY RESULTS: MEAN/MEDIAN REVENUE OVERALL, BY CANTON, BY TREATMENT TYPE
+# ============================================================================
+
+# Overall results
+overall_results <- data.frame(
+  Metric = "Overall",
+  Category = NA,
+  n_practices = nrow(sim_dat),
+  Mean_annual_revenue = round(mean(sim_dat$Annual_revenue_total), 2),
+  Median_annual_revenue = round(median(sim_dat$Annual_revenue_total), 2),
+  SD_annual_revenue = round(sd(sim_dat$Annual_revenue_total), 2),
+  Min_revenue = round(min(sim_dat$Annual_revenue_total), 2),
+  Max_revenue = round(max(sim_dat$Annual_revenue_total), 2),
+  stringsAsFactors = FALSE
+)
+
+# By canton
+canton_results <- sim_dat %>%
+  group_by(kanton) %>%
+  summarize(
+    n_practices = n(),
+    Mean_annual_revenue = round(mean(Annual_revenue_total), 2),
+    Median_annual_revenue = round(median(Annual_revenue_total), 2),
+    SD_annual_revenue = round(sd(Annual_revenue_total), 2),
+    Min_revenue = round(min(Annual_revenue_total), 2),
+    Max_revenue = round(max(Annual_revenue_total), 2),
+    .groups = 'drop'
+  ) %>%
+  mutate(Metric = "By Canton") %>%
+  rename(Category = kanton) %>%
+  select(Metric, Category, everything())
+
+# By treatment type
+treatment_results <- sim_dat %>%
+  group_by(Behandlung) %>%
+  summarize(
+    n_practices = n(),
+    Mean_annual_revenue = round(mean(Annual_revenue_total), 2),
+    Median_annual_revenue = round(median(Annual_revenue_total), 2),
+    SD_annual_revenue = round(sd(Annual_revenue_total), 2),
+    Min_revenue = round(min(Annual_revenue_total), 2),
+    Max_revenue = round(max(Annual_revenue_total), 2),
+    .groups = 'drop'
+  ) %>%
+  mutate(Metric = "By Treatment Type") %>%
+  rename(Category = Behandlung) %>%
+  select(Metric, Category, everything())
+
+# By number of physiotherapists
+physio_results <- sim_dat %>%
+  group_by(n_Physio) %>%
+  summarize(
+    n_practices = n(),
+    Mean_annual_revenue = round(mean(Annual_revenue_total), 2),
+    Median_annual_revenue = round(median(Annual_revenue_total), 2),
+    SD_annual_revenue = round(sd(Annual_revenue_total), 2),
+    Min_revenue = round(min(Annual_revenue_total), 2),
+    Max_revenue = round(max(Annual_revenue_total), 2),
+    .groups = 'drop'
+  ) %>%
+  mutate(Metric = "By # Physiotherapists") %>%
+  rename(Category = n_Physio) %>%
+  mutate(Category = as.character(Category)) %>%
+  select(Metric, Category, everything())
+
+# Top 5 and bottom 5 cantons by mean revenue
+top_cantons <- canton_results %>%
+  top_n(5, Mean_annual_revenue) %>%
+  mutate(Rank = "Top 5")
+
+bottom_cantons <- canton_results %>%
+  top_n(-5, Mean_annual_revenue) %>%
+  mutate(Rank = "Bottom 5")
+
+cat("\n=== TOP 5 CANTONS BY MEAN ANNUAL REVENUE ===\n")
+print(top_cantons)
+
+cat("\n=== BOTTOM 5 CANTONS BY MEAN ANNUAL REVENUE ===\n")
+print(bottom_cantons)
+
+# Write all results to CSV
+write.csv(overall_results, "../outputs/results_overall.csv", row.names = FALSE)
+write.csv(canton_results, "../outputs/results_by_canton.csv", row.names = FALSE)
+write.csv(treatment_results, "../outputs/results_by_treatment.csv", row.names = FALSE)
+write.csv(physio_results, "../outputs/results_by_physio.csv", row.names = FALSE)
+
+cat("\n=== RESULTS CSV FILES SAVED TO: ../outputs/ ===\n")
+
+```
+
+# 9. Session Info & Reproducibility
+
+```{r session_info}
+cat("\n=== REPRODUCIBILITY INFO ===\n")
+cat("Seed:", 42, "\n")
+cat("Working days per month:", WORKING_DAYS_PER_MONTH, "\n")
+cat("Point-to-CHF conversion factor:", POINT_TO_CHF_CONVERSION, "\n")
+cat("Number of practices simulated:", n, "\n")
+cat("\n=== R SESSION INFO ===\n")
+print(sessionInfo())
+
+```
+
+---
+
+## Notes on Data and Assumptions
+
+**Data Sources:**
+- Tariff point values (TPW 2024, KVG): Provided as per Physioswiss reference; source not verified by code.
+
+**Synthetic / Expert Assumptions:**
+- Number of physiotherapists (n_Physio): Uniformly distributed 1–6 per practice.
+- Daily treatments (n_beh): Uniformly distributed 8–20 per physio per day.
+- Service mix probabilities: Assigned to treatment types (7301-7340) as specified.
+- Working days per month: Fixed at 21 days (excludes weekends; ~5 weeks × 4.2 working days/week).
+- Point-to-CHF conversion: Assumed at 1 point = 1 CHF (simplified assumption).
+- Supplement triggering: Probabilistic per supplement type; point-based supplements triggered ~60% of working days on average; annual CHF supplements treated as fixed amounts if triggered.
+
+**Limitations:**
+- No operational cost side (staffing, rent, equipment).
+- No payer mix consideration (private vs. public insurance variation).
+- Simplified operations model (no capacity constraints, patient no-shows, or seasonal variation).
+- Probabilities and service mix are illustrative; real-world practices vary widely.
+- No validation against actual practice data.
+
