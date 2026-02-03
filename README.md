@@ -82,7 +82,7 @@ The following parameters are **synthetic expert assumptions**:
 
 ---
 
-#################### 📈 Results at a Glance ######################
+#################### Results at a Glance ######################
 
 ### "Overall Revenue Distribution"
 ![Annual revenue distribution](outputs/plots/01_revenue_distribution.png)
@@ -95,4 +95,47 @@ The following parameters are **synthetic expert assumptions**:
 ### "Sensitivity Analysis"
 ![Sensitivity analysis](outputs/plots/06_sensitivity_analysis.png)
 
+############################## What Drives Revenue? (Regression) #######################
 
+A multivariate regression confirms:
+
+-Number of physiotherapists is the strongest driver
+-Daily treatment volume has a large effect
+-Canton tariff multiplier significantly shifts outcomes
+-Treatment complexity matters
+
+
+###################### Limitations #######################
+
+This is an exploratory model:
+
+-All operational data is synthetic
+-No cost structure included
+-No payer mix
+-No capacity limits or no-shows
+-Supplement usage simplified
+-Tariff sources not programmatically verified
+
+##################### Future Improvements ###################
+
+-Add operating costs and profit margins
+-Include insurance mix
+-Introduce demand modeling
+-Validate against real practice data
+-Geographic mapping
+-Multi-year scenarios
+
+
+############################# Author Note ####################
+
+This project was created as a portfolio case study to explore Swiss physiotherapy tariffs using simulation and statistical modeling.
+
+It should not be used for business planning without validation and cost-side modeling.
+
+############################# License #######################
+
+MIT License.
+
+Last updated: February 2026
+Seed: 42
+Practices simulated: 160
