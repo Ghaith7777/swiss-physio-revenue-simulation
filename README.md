@@ -158,5 +158,7 @@ It should not be used for business planning without validation and cost-side mod
 MIT License.
 
 Last updated: February 2026
+
 Seed: 42
+
 Practices simulated: 160
