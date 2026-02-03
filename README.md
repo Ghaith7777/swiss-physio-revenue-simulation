@@ -13,9 +13,13 @@ Physiotherapy practices operate under complex tariff structures that differ by c
 I built this project to explore:
 
 - How much revenue practices *could* generate under different staffing models  
+
 - How canton-level tariff multipliers affect income  
+
 - Which treatments contribute most to revenue  
+
 - How sensitive revenue is to patient volume  
+
 - Where the biggest uncertainties lie
 
 All data-generation assumptions are clearly documented, and the model focuses on **exploration rather than prediction**.
@@ -27,9 +31,13 @@ All data-generation assumptions are clearly documented, and the model focuses on
 Simulate annual revenue for 160 hypothetical Swiss physiotherapy practices while varying:
 
 - Canton-specific tariff multipliers (TPW 2024)
+
 - Treatment mix probabilities
+
 - Number of physiotherapists per practice
+
 - Daily treatment volumes
+
 - Optional supplementary charges
 
 The goal is not to forecast real-world income, but to **understand revenue drivers and structural differences** in a transparent, reproducible way.
@@ -100,8 +108,11 @@ The following parameters are **synthetic expert assumptions**:
 A multivariate regression confirms:
 
 -Number of physiotherapists is the strongest driver
+
 -Daily treatment volume has a large effect
+
 -Canton tariff multiplier significantly shifts outcomes
+
 -Treatment complexity matters
 
 
@@ -110,19 +121,29 @@ A multivariate regression confirms:
 This is an exploratory model:
 
 -All operational data is synthetic
+
 -No cost structure included
+
 -No payer mix
+
 -No capacity limits or no-shows
+
 -Supplement usage simplified
+
 -Tariff sources not programmatically verified
 
 ##################### Future Improvements ###################
 
 -Add operating costs and profit margins
+
 -Include insurance mix
+
 -Introduce demand modeling
+
 -Validate against real practice data
+
 -Geographic mapping
+
 -Multi-year scenarios
 
 
